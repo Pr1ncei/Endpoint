@@ -16,6 +16,8 @@ import {
   BOB_FREQUENCY_WALK,
   BOB_LATERAL,
   BOB_SMOOTH,
+  CROUCH_CAMERA_DROP,
+  CROUCH_SPEED,
   DECELERATION,
   FALL_THRESHOLD,
   GRAVITY,
@@ -25,6 +27,14 @@ import {
   PLATFORM_SIZE,
   PLAYER_HEIGHT,
   PLAYER_RADIUS,
+  SLIDE_CAMERA_DROP,
+  SLIDE_CAMERA_SMOOTH,
+  SLIDE_COOLDOWN,
+  SLIDE_DECELERATION,
+  SLIDE_DURATION,
+  SLIDE_MIN_SPEED,
+  SLIDE_SPRINT_GRACE,
+  SLIDE_SPEED,
   SPAWN_POSITION,
   SPRINT_SPEED,
   STEP_MAX,
@@ -62,6 +72,12 @@ export function Player() {
   const input = useKeyboardInput();
   const setTelemetry = useGameStore((s) => s.setTelemetry);
   const registerLock = useGameStore((s) => s.registerLock);
+  const registerUnlock = useGameStore((s) => s.registerUnlock);
+  const toggleSprint = useGameStore((s) => s.toggleSprint);
+  const headBob = useGameStore((s) => s.headBob);
+  const locked = useGameStore((s) => s.locked);
+  const codeEditorOpen = useGameStore((s) => s.codeEditorOpen);
+  const cursorMode = useGameStore((s) => s.cursorMode);
 
   // Persistent per-frame state in refs (no re-renders).
   const eye = useRef(new THREE.Vector3(...SPAWN_POSITION)); // physics eye pos
@@ -70,6 +86,15 @@ export function Player() {
   const grounded = useRef(true);
   const jumpHeld = useRef(false); // for edge-triggered jump
   const jumpBuffer = useRef(0); // seconds a queued jump stays valid
+  const slideHeld = useRef(false);
+  const slideTimer = useRef(0);
+  const slideCooldown = useRef(0);
+  const slideSprintGrace = useRef(0);
+  const slideNeedsReset = useRef(false);
+  const slideDir = useRef(new THREE.Vector3());
+  const slideCameraDrop = useRef(0);
+  const sprintHeld = useRef(false);
+  const sprintLatched = useRef(false);
   const bobPhase = useRef(0); // advances with horizontal speed
   const bobY = useRef(0); // smoothed vertical bob
   const bobX = useRef(0); // smoothed lateral bob
@@ -83,6 +108,7 @@ export function Player() {
     if (!controls) return;
     controls.pointerSpeed = MOUSE_SENSITIVITY;
     registerLock(() => controls.lock());
+    registerUnlock(() => controls.unlock());
     const onLock = () => useGameStore.getState().setLocked(true);
     const onUnlock = () => useGameStore.getState().setLocked(false);
     controls.addEventListener("lock", onLock);
@@ -91,13 +117,36 @@ export function Player() {
       controls.removeEventListener("lock", onLock);
       controls.removeEventListener("unlock", onUnlock);
       registerLock(null);
+      registerUnlock(null);
     };
-  }, [registerLock]);
+  }, [registerLock, registerUnlock]);
 
   useFrame((_, rawDelta) => {
     // Clamp delta so a tab-switch spike doesn't fling the player.
     const delta = Math.min(rawDelta, 1 / 30);
     const i = input.current;
+
+    if (!locked || codeEditorOpen || cursorMode) {
+      velocity.current.set(0, 0, 0);
+      verticalVel.current = 0;
+      slideTimer.current = 0;
+      slideCooldown.current = 0;
+      slideSprintGrace.current = 0;
+      sprintLatched.current = false;
+      bobX.current = THREE.MathUtils.damp(bobX.current, 0, BOB_SMOOTH, delta);
+      bobY.current = THREE.MathUtils.damp(bobY.current, 0, BOB_SMOOTH, delta);
+      slideCameraDrop.current = THREE.MathUtils.damp(
+        slideCameraDrop.current,
+        0,
+        SLIDE_CAMERA_SMOOTH,
+        delta
+      );
+      camera.position.x = eye.current.x + bobX.current;
+      camera.position.z = eye.current.z;
+      camera.position.y = eye.current.y + bobY.current - slideCameraDrop.current;
+      setTelemetry(0, grounded.current);
+      return;
+    }
 
     // --- Build the wish direction from input in camera space -----------
     // Flatten camera forward onto the XZ plane so we never fly.
@@ -114,29 +163,28 @@ export function Player() {
     const hasInput = _wishDir.lengthSq() > 0;
     if (hasInput) _wishDir.normalize();
 
-    // --- Horizontal velocity (sprint is independent of jump) -----------
-    const targetSpeed = i.sprint ? SPRINT_SPEED : WALK_SPEED;
-    const targetX = _wishDir.x * targetSpeed;
-    const targetZ = _wishDir.z * targetSpeed;
-    const rate = (hasInput ? ACCELERATION : DECELERATION) / 10;
-    velocity.current.x = THREE.MathUtils.damp(
-      velocity.current.x,
-      targetX,
-      rate,
-      delta
-    );
-    velocity.current.z = THREE.MathUtils.damp(
-      velocity.current.z,
-      targetZ,
-      rate,
-      delta
-    );
+    const sprintPressed = i.sprint && !sprintHeld.current;
+    sprintHeld.current = i.sprint;
+    if (toggleSprint && sprintPressed) {
+      sprintLatched.current = !sprintLatched.current;
+    } else if (!toggleSprint) {
+      sprintLatched.current = false;
+    }
+
+    const effectiveSprint = toggleSprint ? sprintLatched.current : i.sprint;
+    const sprinting = effectiveSprint && hasInput;
+    let sliding = slideTimer.current > 0;
+    if (sprinting) {
+      slideSprintGrace.current = SLIDE_SPRINT_GRACE;
+    } else if (slideSprintGrace.current > 0) {
+      slideSprintGrace.current -= delta;
+    }
+    if (slideCooldown.current > 0) {
+      slideCooldown.current -= delta;
+    }
 
     // --- Jump (edge-triggered + buffered, fully decoupled from sprint) -
-    // A press only counts on the rising edge so holding Space doesn't
-    // auto-bunny-hop. A short buffer lets a slightly-early press still fire
-    // the moment we touch the ground. None of this touches `i.sprint`, so
-    // sprinting + jumping work in any combination.
+    // Resolve jump before slide/movement so Shift never gates Space.
     const jumpPressed = i.jump && !jumpHeld.current;
     jumpHeld.current = i.jump;
     if (jumpPressed) jumpBuffer.current = JUMP_BUFFER_TIME;
@@ -146,6 +194,82 @@ export function Player() {
       verticalVel.current = JUMP_VELOCITY;
       grounded.current = false;
       jumpBuffer.current = 0;
+      slideTimer.current = 0;
+      sliding = false;
+    }
+
+    const crouching =
+      i.slide &&
+      grounded.current &&
+      !sliding &&
+      slideSprintGrace.current <= 0;
+
+    // --- Slide ---------------------------------------------------------
+    // Start a COD-style slide only from a grounded sprint. Once started, it
+    // keeps its own forward momentum so releasing Shift mid-slide does not
+    // immediately kill the motion.
+    const slidePressed = i.slide && !slideHeld.current;
+    slideHeld.current = i.slide;
+    if (!i.slide && slideTimer.current <= 0 && slideCooldown.current <= 0) {
+      slideNeedsReset.current = false;
+    }
+    if (
+      slidePressed &&
+      hasInput &&
+      slideSprintGrace.current > 0 &&
+      grounded.current &&
+      slideCooldown.current <= 0 &&
+      !slideNeedsReset.current
+    ) {
+      slideDir.current.copy(_wishDir);
+      slideTimer.current = SLIDE_DURATION;
+      velocity.current.x = slideDir.current.x * SLIDE_SPEED;
+      velocity.current.z = slideDir.current.z * SLIDE_SPEED;
+      slideNeedsReset.current = true;
+      sliding = true;
+    }
+
+    // --- Horizontal velocity (sprint is independent of jump) -----------
+    if (sliding) {
+      slideTimer.current -= delta;
+      const slideSpeed = Math.max(
+        0,
+        Math.hypot(velocity.current.x, velocity.current.z) -
+          SLIDE_DECELERATION * delta
+      );
+      velocity.current.x = slideDir.current.x * slideSpeed;
+      velocity.current.z = slideDir.current.z * slideSpeed;
+
+      if (slideTimer.current <= 0 || slideSpeed < SLIDE_MIN_SPEED) {
+        slideTimer.current = 0;
+        slideCooldown.current = SLIDE_COOLDOWN;
+      }
+    } else {
+      const targetSpeed = crouching
+        ? CROUCH_SPEED
+        : effectiveSprint
+          ? SPRINT_SPEED
+          : WALK_SPEED;
+      const preserveAirMomentum = !grounded.current && !hasInput;
+      const targetX = preserveAirMomentum
+        ? velocity.current.x
+        : _wishDir.x * targetSpeed;
+      const targetZ = preserveAirMomentum
+        ? velocity.current.z
+        : _wishDir.z * targetSpeed;
+      const rate = (hasInput || preserveAirMomentum ? ACCELERATION : DECELERATION) / 10;
+      velocity.current.x = THREE.MathUtils.damp(
+        velocity.current.x,
+        targetX,
+        rate,
+        delta
+      );
+      velocity.current.z = THREE.MathUtils.damp(
+        velocity.current.z,
+        targetZ,
+        rate,
+        delta
+      );
     }
 
     // --- Gravity -------------------------------------------------------
@@ -199,7 +323,7 @@ export function Player() {
 
     // --- Head bobbing --------------------------------------------------
     const speed = Math.hypot(velocity.current.x, velocity.current.z);
-    const sprintFactor = i.sprint ? 1 : 0;
+    const sprintFactor = effectiveSprint || slideTimer.current > 0 ? 1 : 0;
     const amount = THREE.MathUtils.lerp(
       BOB_AMOUNT_WALK,
       BOB_AMOUNT_SPRINT,
@@ -211,15 +335,19 @@ export function Player() {
       sprintFactor
     );
 
-    bobPhase.current += speed * freq * delta;
+    bobPhase.current += freq * Math.min(speed / SPRINT_SPEED, 1) * delta;
     const intensity = Math.min(speed / WALK_SPEED, 1);
 
-    _targetBob.set(
-      Math.cos(bobPhase.current) * BOB_LATERAL * intensity,
-      Math.abs(Math.sin(bobPhase.current)) * amount * intensity * 2,
-      0
-    );
-    if (speed < 0.05) _targetBob.set(0, 0, 0);
+    if (headBob) {
+      _targetBob.set(
+        Math.cos(bobPhase.current) * BOB_LATERAL * intensity,
+        Math.abs(Math.sin(bobPhase.current)) * amount * intensity * 2,
+        0
+      );
+      if (speed < 0.05) _targetBob.set(0, 0, 0);
+    } else {
+      _targetBob.set(0, 0, 0);
+    }
 
     bobX.current = THREE.MathUtils.damp(
       bobX.current,
@@ -233,6 +361,16 @@ export function Player() {
       BOB_SMOOTH,
       delta
     );
+    slideCameraDrop.current = THREE.MathUtils.damp(
+      slideCameraDrop.current,
+      sliding && grounded.current
+        ? SLIDE_CAMERA_DROP
+        : crouching
+          ? CROUCH_CAMERA_DROP
+          : 0,
+      SLIDE_CAMERA_SMOOTH,
+      delta
+    );
 
     // --- Commit to camera ---------------------------------------------
     // Lateral sway follows the camera's right vector; vertical bob is a Y
@@ -241,10 +379,17 @@ export function Player() {
     // eslint-disable-next-line react-hooks/immutability
     camera.position.x = eye.current.x + _right.x * bobX.current;
     camera.position.z = eye.current.z + _right.z * bobX.current;
-    camera.position.y = eye.current.y + bobY.current;
+    camera.position.y = eye.current.y + bobY.current - slideCameraDrop.current;
 
     setTelemetry(speed, grounded.current);
   });
 
-  return <PointerLockControls ref={controlsRef} makeDefault />;
+  return (
+    <PointerLockControls
+      ref={controlsRef}
+      makeDefault
+      enabled={!codeEditorOpen && !cursorMode}
+      selector=".game-canvas"
+    />
+  );
 }

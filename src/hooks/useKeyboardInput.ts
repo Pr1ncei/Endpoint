@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { useGameStore } from "@/store/useGameStore";
 
 export interface InputState {
   forward: boolean;
@@ -9,6 +10,7 @@ export interface InputState {
   right: boolean;
   jump: boolean;
   sprint: boolean;
+  slide: boolean;
 }
 
 /**
@@ -27,9 +29,41 @@ export function useKeyboardInput() {
     right: false,
     jump: false,
     sprint: false,
+    slide: false,
   });
 
   useEffect(() => {
+    const releaseAll = () => {
+      const i = input.current;
+      i.forward =
+        i.backward =
+        i.left =
+        i.right =
+        i.jump =
+        i.sprint =
+        i.slide =
+          false;
+    };
+
+    const capturedCodes = [
+      "KeyW",
+      "KeyA",
+      "KeyS",
+      "KeyD",
+      "Space",
+      "ArrowUp",
+      "ArrowDown",
+      "ArrowLeft",
+      "ArrowRight",
+      "ShiftLeft",
+      "ShiftRight",
+      "ControlLeft",
+      "ControlRight",
+      "KeyC",
+      "AltLeft",
+      "AltRight",
+    ];
+
     const setKey = (code: string, value: boolean) => {
       const i = input.current;
       switch (code) {
@@ -56,41 +90,74 @@ export function useKeyboardInput() {
         case "ShiftRight":
           i.sprint = value;
           break;
+        case "ControlLeft":
+        case "ControlRight":
+        case "KeyC":
+          i.slide = value;
+          break;
         default:
           break;
       }
     };
 
+    const isTypingTarget = (target: EventTarget | null) => {
+      if (!(target instanceof HTMLElement)) return false;
+      return (
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.isContentEditable
+      );
+    };
+
     const onDown = (e: KeyboardEvent) => {
-      // Prevent the page from scrolling when using Space / arrows.
+      const gameState = useGameStore.getState();
+      if ((e.code === "AltLeft" || e.code === "AltRight") && !e.repeat) {
+        e.preventDefault();
+        releaseAll();
+        gameState.toggleCursorMode();
+        return;
+      }
+
       if (
-        [
-          "Space",
-          "ArrowUp",
-          "ArrowDown",
-          "ArrowLeft",
-          "ArrowRight",
-        ].includes(e.code)
+        gameState.codeEditorOpen ||
+        gameState.cursorMode ||
+        isTypingTarget(e.target)
       ) {
+        releaseAll();
+        return;
+      }
+      // Prevent the page from scrolling when using Space / arrows.
+      if (capturedCodes.includes(e.code)) {
         e.preventDefault();
       }
       setKey(e.code, true);
     };
-    const onUp = (e: KeyboardEvent) => setKey(e.code, false);
+    const onUp = (e: KeyboardEvent) => {
+      const gameState = useGameStore.getState();
+      if (
+        gameState.codeEditorOpen ||
+        gameState.cursorMode ||
+        isTypingTarget(e.target)
+      ) {
+        releaseAll();
+        return;
+      }
+      if (capturedCodes.includes(e.code)) {
+        e.preventDefault();
+      }
+      setKey(e.code, false);
+    };
 
     // If the window loses focus (alt-tab), release everything so the player
     // doesn't keep walking forever.
-    const onBlur = () => {
-      const i = input.current;
-      i.forward = i.backward = i.left = i.right = i.jump = i.sprint = false;
-    };
+    const onBlur = () => releaseAll();
 
-    window.addEventListener("keydown", onDown);
-    window.addEventListener("keyup", onUp);
+    window.addEventListener("keydown", onDown, { capture: true });
+    window.addEventListener("keyup", onUp, { capture: true });
     window.addEventListener("blur", onBlur);
     return () => {
-      window.removeEventListener("keydown", onDown);
-      window.removeEventListener("keyup", onUp);
+      window.removeEventListener("keydown", onDown, { capture: true });
+      window.removeEventListener("keyup", onUp, { capture: true });
       window.removeEventListener("blur", onBlur);
     };
   }, []);
