@@ -14,8 +14,17 @@ export const DECELERATION = 50; // how quickly we slow down when no input
 // satisfying jump + gravity so the prototype feels "game-like".
 export const JUMP_VELOCITY = 6.2; // initial upward speed on Space
 export const GRAVITY = 18.0; // downward acceleration m/s^2
-export const PLAYER_HEIGHT = 1.7; // eye height above the platform
-export const PLAYER_RADIUS = 0.4; // used for soft boundary clamping
+export const PLAYER_HEIGHT = 1.7; // eye height above the ground
+export const PLAYER_RADIUS = 0.4; // body radius for collisions + edge clamp
+
+// Jump feel: a short input buffer lets a Space press "count" even if it lands a
+// hair before becoming grounded. Jump is edge-triggered (holding Space does not
+// auto-bunny-hop), and fully independent of sprint so you can sprint-jump.
+export const JUMP_BUFFER_TIME = 0.12; // seconds a queued jump stays valid
+
+// Max step height the player can walk up without jumping. Lets ramps (gentle
+// slope) be climbed, while the high face of a ramp / walls act as blockers.
+export const STEP_MAX = 0.5;
 
 // --- Camera bobbing --------------------------------------------------------
 // Bobbing is driven by a phase that advances with horizontal speed.
@@ -29,7 +38,6 @@ export const BOB_SMOOTH = 8.0; // how fast bobbing eases in/out
 
 // --- Mouse look ------------------------------------------------------------
 export const MOUSE_SENSITIVITY = 1.0; // multiplier for pointer-lock look
-export const PITCH_LIMIT = Math.PI / 2 - 0.05; // clamp vertical look (~89deg)
 
 // --- World -----------------------------------------------------------------
 export const PLATFORM_SIZE = 80; // square platform edge length (m)
@@ -37,32 +45,40 @@ export const PLATFORM_THICKNESS = 1.0; // how thick the floor slab is
 export const SPAWN_POSITION: [number, number, number] = [0, PLAYER_HEIGHT, 12];
 export const FALL_THRESHOLD = -15; // y below which we reset the player to spawn
 
-// --- Atmosphere / fog ------------------------------------------------------
-// A cool blue-grey haze that gives depth without obscuring nearby geometry.
-export const FOG_COLOR = "#0a0e16";
-export const SCENE_BACKGROUND = "#070a11";
-export const FOG_NEAR = 12;
-export const FOG_FAR = 75;
+// --- Atmosphere / fog / sky ------------------------------------------------
+// Light, airy test chamber: pale-blue horizon haze fading into a blue sky dome.
+export const FOG_COLOR = "#c8d6e8"; // matches the sky horizon so depth blends
+export const SCENE_BACKGROUND = "#c8d6e8"; // fallback flat color (sky dome covers it)
+export const FOG_NEAR = 18;
+export const FOG_FAR = 95;
+
+// Sky dome gradient (top = zenith, bottom = horizon). Rendered as a big inverted
+// sphere in Environment with a tiny shader; see <SkyDome/>.
+export const SKY_TOP_COLOR = "#4a8fc7"; // medium sky blue at the zenith
+export const SKY_BOTTOM_COLOR = "#dbe7f2"; // pale, near-white at the horizon
 
 // --- Lighting --------------------------------------------------------------
-export const AMBIENT_INTENSITY = 0.35;
-export const HEMISPHERE_INTENSITY = 0.5;
-export const SUN_INTENSITY = 1.6;
-export const SUN_POSITION: [number, number, number] = [18, 30, 12];
-export const SUN_COLOR = "#cfe2ff";
-export const HEMI_SKY_COLOR = "#1a2740";
-export const HEMI_GROUND_COLOR = "#0a0d14";
+// Bright, clean daylight so the white platform reads as a sunlit test chamber.
+export const AMBIENT_INTENSITY = 0.7;
+export const HEMISPHERE_INTENSITY = 0.8;
+export const SUN_INTENSITY = 2.2;
+export const SUN_POSITION: [number, number, number] = [20, 35, 15];
+export const SUN_COLOR = "#fff4e0"; // warm white sunlight
+export const HEMI_SKY_COLOR = "#cfe3f5";
+export const HEMI_GROUND_COLOR = "#b9c2cf";
 
 // --- Palette ---------------------------------------------------------------
-// Minimal sci-fi materials. Kept here so the whole scene reads as one piece.
+// Light, minimal sci-fi materials. White/grey surfaces with teal accents so the
+// scene reads as a clean test chamber rather than a dark or toy-like one.
 export const COLORS = {
-  floor: "#12161f",
-  floorPanel: "#0c0f16",
-  floorEdge: "#2a3245",
-  panel: "#1a2030",
-  pillar: "#222a3b",
-  terminal: "#2b3550",
-  terminalEmissive: "#3bd0d0",
-  ramp: "#191f2c",
-  accent: "#4fd1c5",
+  floor: "#eef2f7", // near-white platform, slight cool tint
+  floorPanel: "#e2e8f0",
+  floorEdge: "#9fb0c8", // soft blue-grey grid lines
+  panel: "#d2dae6", // walls
+  pillar: "#c4cedd",
+  terminal: "#c6d0de",
+  terminalEmissive: "#16a3a3", // teal accent (pops on white)
+  ramp: "#dde5f0",
+  accent: "#1f8f8f",
+  trim: "#3a567a", // perimeter edge line (non-emissive, painted look)
 } as const;

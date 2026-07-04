@@ -13,7 +13,8 @@ import { SCENE_BACKGROUND } from "@/game/constants";
  * for a slightly cinematic look, and drops in the Player + Environment.
  *
  * `usePointerLockSync` keeps the store's `locked` flag in sync with the
- * browser so the HUD overlay can react.
+ * browser so the HUD overlay can react. The scene background is a flat fallback
+ * color; the gradient sky dome rendered inside <Environment> covers it.
  */
 export function GameScene() {
   usePointerLockSync();
@@ -30,6 +31,7 @@ export function GameScene() {
       }}
       camera={{ fov: 72, near: 0.1, far: 200, position: [0, 1.7, 12] }}
       onCreated={({ scene }) => {
+        // Fallback background; the SkyDome mesh in Environment covers this.
         scene.background = new THREE.Color(SCENE_BACKGROUND);
       }}
     >

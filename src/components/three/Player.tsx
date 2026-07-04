@@ -7,6 +7,7 @@ import type { PointerLockControls as PLCImpl } from "three-stdlib";
 import * as THREE from "three";
 import { useKeyboardInput } from "@/hooks/useKeyboardInput";
 import { useGameStore } from "@/store/useGameStore";
+import { resolveBodyCollisions, sampleGroundHeight } from "@/game/colliders";
 import {
   ACCELERATION,
   BOB_AMOUNT_SPRINT,
@@ -18,6 +19,7 @@ import {
   DECELERATION,
   FALL_THRESHOLD,
   GRAVITY,
+  JUMP_BUFFER_TIME,
   JUMP_VELOCITY,
   MOUSE_SENSITIVITY,
   PLATFORM_SIZE,
@@ -25,6 +27,7 @@ import {
   PLAYER_RADIUS,
   SPAWN_POSITION,
   SPRINT_SPEED,
+  STEP_MAX,
   WALK_SPEED,
 } from "@/game/constants";
 
@@ -41,10 +44,13 @@ const _targetBob = new THREE.Vector3();
  *  - Owns the camera (we drive its position each frame; drei's
  *    PointerLockControls drives rotation via mouse).
  *  - Reads keyboard input for WASD movement + Shift sprint + Space jump.
- *  - Integrates simple gravity + jump (not a full physics engine — just
- *    enough to feel game-like).
+ *  - Jump is edge-triggered with a small input buffer, and fully decoupled
+ *    from sprint — you can sprint while jumping and vice versa.
+ *  - Integrates gravity + jump, and resolves ground against the flat platform
+ *    AND the ramps (heightfield), so you can walk up/down ramps.
+ *  - Resolves body collisions against boxes + pillars (push-out) so the world
+ *    feels solid. A step limit prevents teleporting up walls.
  *  - Applies a polished head-bob that scales with speed.
- *  - Clamps the player to the platform and respawns on falling off.
  *
  * The camera never orbits — it is locked to the player's eyes. We keep the
  * "true" eye position in `eye` (physics) and add the bob offset on top when
@@ -62,6 +68,8 @@ export function Player() {
   const velocity = useRef(new THREE.Vector3()); // horizontal velocity
   const verticalVel = useRef(0);
   const grounded = useRef(true);
+  const jumpHeld = useRef(false); // for edge-triggered jump
+  const jumpBuffer = useRef(0); // seconds a queued jump stays valid
   const bobPhase = useRef(0); // advances with horizontal speed
   const bobY = useRef(0); // smoothed vertical bob
   const bobX = useRef(0); // smoothed lateral bob
@@ -73,10 +81,7 @@ export function Player() {
   useEffect(() => {
     const controls = controlsRef.current;
     if (!controls) return;
-    // drei's PointerLockControls forwards to three-stdlib's impl which exposes
-    // `pointerSpeed` (default 1). Setting it here lets MOUSE_SENSITIVITY work.
     controls.pointerSpeed = MOUSE_SENSITIVITY;
-    // Expose a lock trigger so the HUD overlay can request pointer lock.
     registerLock(() => controls.lock());
     const onLock = () => useGameStore.getState().setLocked(true);
     const onUnlock = () => useGameStore.getState().setLocked(false);
@@ -109,11 +114,10 @@ export function Player() {
     const hasInput = _wishDir.lengthSq() > 0;
     if (hasInput) _wishDir.normalize();
 
-    // --- Horizontal velocity with accel/decel --------------------------
+    // --- Horizontal velocity (sprint is independent of jump) -----------
     const targetSpeed = i.sprint ? SPRINT_SPEED : WALK_SPEED;
     const targetX = _wishDir.x * targetSpeed;
     const targetZ = _wishDir.z * targetSpeed;
-
     const rate = (hasInput ? ACCELERATION : DECELERATION) / 10;
     velocity.current.x = THREE.MathUtils.damp(
       velocity.current.x,
@@ -128,23 +132,56 @@ export function Player() {
       delta
     );
 
-    // --- Jump + gravity (simple vertical integration) ------------------
-    if (i.jump && grounded.current) {
+    // --- Jump (edge-triggered + buffered, fully decoupled from sprint) -
+    // A press only counts on the rising edge so holding Space doesn't
+    // auto-bunny-hop. A short buffer lets a slightly-early press still fire
+    // the moment we touch the ground. None of this touches `i.sprint`, so
+    // sprinting + jumping work in any combination.
+    const jumpPressed = i.jump && !jumpHeld.current;
+    jumpHeld.current = i.jump;
+    if (jumpPressed) jumpBuffer.current = JUMP_BUFFER_TIME;
+    else if (jumpBuffer.current > 0) jumpBuffer.current -= delta;
+
+    if (jumpBuffer.current > 0 && grounded.current) {
       verticalVel.current = JUMP_VELOCITY;
       grounded.current = false;
+      jumpBuffer.current = 0;
     }
+
+    // --- Gravity -------------------------------------------------------
     verticalVel.current -= GRAVITY * delta;
 
-    // Integrate position.
+    // --- Integrate horizontal ------------------------------------------
+    const oldX = eye.current.x;
+    const oldZ = eye.current.z;
     eye.current.x += velocity.current.x * delta;
     eye.current.z += velocity.current.z * delta;
-    eye.current.y += verticalVel.current * delta;
 
-    // Ground collision at eye height.
-    if (eye.current.y <= PLAYER_HEIGHT) {
-      eye.current.y = PLAYER_HEIGHT;
+    // --- Body collisions (boxes + pillars push the player out) ---------
+    resolveBodyCollisions(eye.current, PLAYER_RADIUS);
+
+    // --- Ground height (flat platform OR ramp surface) -----------------
+    let groundH = sampleGroundHeight(eye.current.x, eye.current.z);
+    const feet = eye.current.y - PLAYER_HEIGHT;
+
+    // Step limit: if the ground ahead is much higher than our feet (e.g. the
+    // high face of a ramp or a wall), block the horizontal move. Ramps ascend
+    // gradually so their per-frame rise is tiny and never triggers this.
+    if (grounded.current && groundH - feet > STEP_MAX) {
+      eye.current.x = oldX;
+      eye.current.z = oldZ;
+      groundH = sampleGroundHeight(eye.current.x, eye.current.z);
+    }
+
+    // --- Integrate vertical + resolve ground ---------------------------
+    eye.current.y += verticalVel.current * delta;
+    const groundY = groundH + PLAYER_HEIGHT;
+    if (eye.current.y <= groundY) {
+      eye.current.y = groundY;
       verticalVel.current = 0;
       grounded.current = true;
+    } else {
+      grounded.current = false;
     }
 
     // --- Boundary clamp: keep the player on the platform ---------------
@@ -161,8 +198,6 @@ export function Player() {
     }
 
     // --- Head bobbing --------------------------------------------------
-    // Advance the phase proportionally to horizontal speed. When idle the
-    // phase freezes and the offset eases back to zero (via the damp below).
     const speed = Math.hypot(velocity.current.x, velocity.current.z);
     const sprintFactor = i.sprint ? 1 : 0;
     const amount = THREE.MathUtils.lerp(
@@ -179,14 +214,12 @@ export function Player() {
     bobPhase.current += speed * freq * delta;
     const intensity = Math.min(speed / WALK_SPEED, 1);
 
-    // Vertical bob uses a double-frequency sine for a footstep cadence;
-    // lateral sway uses a single-frequency cosine.
     _targetBob.set(
       Math.cos(bobPhase.current) * BOB_LATERAL * intensity,
       Math.abs(Math.sin(bobPhase.current)) * amount * intensity * 2,
       0
     );
-    if (speed < 0.05) _targetBob.set(0, 0, 0); // calm when idle
+    if (speed < 0.05) _targetBob.set(0, 0, 0);
 
     bobX.current = THREE.MathUtils.damp(
       bobX.current,
@@ -202,10 +235,9 @@ export function Player() {
     );
 
     // --- Commit to camera ---------------------------------------------
-    // Lateral sway is applied along the camera's right vector so it follows
-    // the view direction; vertical bob is a plain Y offset.
-    // Mutating the R3F camera each frame is the intended pattern here, so we
-    // silence the hooks-immutability lint rule for these assignments.
+    // Lateral sway follows the camera's right vector; vertical bob is a Y
+    // offset. Mutating the R3F camera each frame is the intended pattern, so
+    // we silence the hooks-immutability lint rule for these assignments.
     // eslint-disable-next-line react-hooks/immutability
     camera.position.x = eye.current.x + _right.x * bobX.current;
     camera.position.z = eye.current.z + _right.z * bobX.current;

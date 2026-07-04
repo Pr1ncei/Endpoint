@@ -23,3 +23,21 @@ Stage Summary:
 - Verified in-browser via agent-browser: page renders, WebGL context active (1280px drawing buffer), clicking start overlay engages pointer lock (overlay disappears), WASD input pipeline works (press KeyW -> telemetry 0.2 m/s), no runtime/console errors.
 - VLM analysis of screenshot confirmed: dark grid floor with cyan grid lines, cylindrical pillars with glowing cyan caps, terminal blocks with emissive accents, ramp, atmospheric fog, centered crosshair, bottom-left telemetry — matches intended clean sci-fi test-chamber look.
 - Adaptation note: delivered in Next.js 16 (sandbox preview is locked to port 3000 / Next.js) instead of Vite. R3F code is identical; porting to Vite requires only page.tsx->main.tsx+index.html and dropping "use client" directives.
+
+---
+Task ID: 2
+Agent: main (direct)
+Task: Three revisions — (1) light/white map with blue gradient sky, (2) fix sprint+jump so you can sprint while jumping, (3) ramp collisions.
+
+Work Log:
+- src/game/layout.ts (NEW): single source of truth for RAMP_DEFS, BOX_DEFS, PILLAR_DEFS. Both Environment (render) and colliders (physics) read from here so visuals+collision never drift.
+- src/game/colliders.ts (NEW): sampleGroundHeight(x,z) walks ramps analytically (tilted-plane heightfield + 0.1m slab offset); resolveBodyCollisions(pos,radius) pushes player circle out of OBB boxes (honoring rotationY) and cylinder pillars.
+- src/game/constants.ts: light palette (floor #eef2f7, props light grey, teal accents), pale-blue fog #c8d6e8, sky gradient colors (top #4a8fc7 / bottom #dbe7f2), brighter daylight (ambient 0.7, hemi 0.8, sun 2.2 warm white). Added JUMP_BUFFER_TIME=0.12, STEP_MAX=0.5. Removed unused PITCH_LIMIT.
+- src/components/three/Environment.tsx: rewrote with <SkyDome> (BackSide sphere + shader gradient, fog=false, depthWrite=false, renderOrder=-1), light materials, renders all props from shared layout. Removed old inline layout + dark dais.
+- src/components/three/Player.tsx: edge-triggered jump with input buffer (decoupled from sprint), ground resolution via sampleGroundHeight (ramps walkable), body collisions via resolveBodyCollisions, step-limit blocks walking up walls/high ramp faces. Sprint fully independent of jump.
+- src/scenes/GameScene.tsx: scene.background now just a fallback (sky dome covers it).
+- src/styles/game.css: light-theme HUD (white overlay card, dark crosshair w/ white ring, light telemetry box).
+
+Stage Summary:
+- Lint clean.
+- Verified in-browser: light/white grid floor + blue gradient sky + visible props (VLM confirmed). Sprint (8.9 m/s) + jump while sprinting = airborne (grounded=false) with sprint speed maintained — fixed. Ramp walking: player walks up ramp surface staying grounded=true, can jump on ramp and land back on it — collisions working. Body collisions block pillars/boxes/walls. No runtime errors.
