@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo } from "react";
-import { Grid } from "@react-three/drei";
+import { useEffect, useRef } from "react";
+import { Grid, Text } from "@react-three/drei";
+import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import {
   AMBIENT_INTENSITY,
@@ -13,59 +14,17 @@ import {
   HEMI_SKY_COLOR,
   HEMISPHERE_INTENSITY,
   PLATFORM_SIZE,
-  PLATFORM_THICKNESS,
-  SKY_BOTTOM_COLOR,
-  SKY_TOP_COLOR,
   SUN_COLOR,
   SUN_INTENSITY,
   SUN_POSITION,
 } from "@/game/constants";
 import { RAMP_DEFS, BOX_DEFS, PILLAR_DEFS } from "@/game/layout";
+import { useGameStore } from "@/store/useGameStore";
 
-/**
- * Smooth vertical-gradient sky dome. A big inverted sphere with a tiny shader
- * that blends from a pale horizon (SKY_BOTTOM_COLOR) up to a blue zenith
- * (SKY_TOP_COLOR). `fog={false}` keeps the sky crisp; `depthWrite={false}` +
- * `renderOrder={-1}` ensure it always sits behind the world geometry.
- */
-function SkyDome() {
-  const uniforms = useMemo(
-    () => ({
-      topColor: { value: new THREE.Color(SKY_TOP_COLOR) },
-      bottomColor: { value: new THREE.Color(SKY_BOTTOM_COLOR) },
-    }),
-    []
-  );
-
-  return (
-    <mesh renderOrder={-1} frustumCulled={false}>
-      <sphereGeometry args={[180, 32, 16]} />
-      <shaderMaterial
-        side={THREE.BackSide}
-        fog={false}
-        depthWrite={false}
-        uniforms={uniforms}
-        vertexShader={`
-          varying vec3 vPos;
-          void main() {
-            vPos = position;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-          }
-        `}
-        fragmentShader={`
-          varying vec3 vPos;
-          uniform vec3 topColor;
-          uniform vec3 bottomColor;
-          void main() {
-            float h = clamp(normalize(vPos).y * 0.5 + 0.5, 0.0, 1.0);
-            // Ease toward the top color so the gradient feels like a real sky.
-            gl_FragColor = vec4(mix(bottomColor, topColor, pow(h, 0.8)), 1.0);
-          }
-        `}
-      />
-    </mesh>
-  );
-}
+const DOOR_POSITION = new THREE.Vector3(0, 0, -37.5);
+const KEYPAD_POSITION = new THREE.Vector3(3.2, 1.35, -36.9);
+const _cameraDirection = new THREE.Vector3();
+const _keypadDirection = new THREE.Vector3();
 
 /** A ramp rendered as a tilted slab whose top surface matches the collider's
  *  analytical plane (low end at ground, high end at `height`). */
@@ -197,18 +156,149 @@ function PerimeterTrim() {
   );
 }
 
+function ApiDoor() {
+  const leftDoor = useRef<THREE.Mesh>(null);
+  const rightDoor = useRef<THREE.Mesh>(null);
+  const statusLight = useRef<THREE.Mesh>(null);
+  const promptVisible = useRef(false);
+  const { camera } = useThree();
+  const doorUnlocked = useGameStore((s) => s.doorUnlocked);
+  const openCodeEditor = useGameStore((s) => s.openCodeEditor);
+  const setInteractionPrompt = useGameStore((s) => s.setInteractionPrompt);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.code !== "KeyE") return;
+      const state = useGameStore.getState();
+      if (state.codeEditorOpen || state.doorUnlocked) return;
+
+      const distance = camera.position.distanceTo(KEYPAD_POSITION);
+      camera.getWorldDirection(_cameraDirection);
+      _keypadDirection.copy(KEYPAD_POSITION).sub(camera.position).normalize();
+      if (distance < 4 && _cameraDirection.dot(_keypadDirection) > 0.55) {
+        event.preventDefault();
+        openCodeEditor();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [camera, openCodeEditor]);
+
+  useFrame((_, delta) => {
+    const distance = camera.position.distanceTo(KEYPAD_POSITION);
+    camera.getWorldDirection(_cameraDirection);
+    _keypadDirection.copy(KEYPAD_POSITION).sub(camera.position).normalize();
+    const canInteract =
+      !doorUnlocked && distance < 4 && _cameraDirection.dot(_keypadDirection) > 0.55;
+    if (promptVisible.current !== canInteract) {
+      promptVisible.current = canInteract;
+      setInteractionPrompt(canInteract ? "Press E to edit access script" : null);
+    }
+
+    const openAmount = doorUnlocked ? 1.25 : 0;
+    if (leftDoor.current) {
+      leftDoor.current.position.x = THREE.MathUtils.damp(
+        leftDoor.current.position.x,
+        -openAmount,
+        6,
+        delta
+      );
+    }
+    if (rightDoor.current) {
+      rightDoor.current.position.x = THREE.MathUtils.damp(
+        rightDoor.current.position.x,
+        openAmount,
+        6,
+        delta
+      );
+    }
+    if (statusLight.current) {
+      statusLight.current.scale.setScalar(
+        THREE.MathUtils.damp(statusLight.current.scale.x, doorUnlocked ? 1.35 : 1, 7, delta)
+      );
+    }
+  });
+
+  return (
+    <group position={DOOR_POSITION}>
+      <mesh castShadow receiveShadow position={[0, 2.2, -0.2]}>
+        <boxGeometry args={[6.2, 4.4, 0.35]} />
+        <meshStandardMaterial color="#b8c5d4" metalness={0.35} roughness={0.48} />
+      </mesh>
+      <mesh castShadow receiveShadow position={[0, 2.2, -0.01]}>
+        <boxGeometry args={[4.2, 3.45, 0.42]} />
+        <meshStandardMaterial color="#2f4258" metalness={0.45} roughness={0.35} />
+      </mesh>
+      <mesh ref={leftDoor} castShadow receiveShadow position={[-0.54, 2.05, 0.16]}>
+        <boxGeometry args={[1.95, 3.1, 0.24]} />
+        <meshStandardMaterial color="#d7dde6" metalness={0.4} roughness={0.42} />
+      </mesh>
+      <mesh ref={rightDoor} castShadow receiveShadow position={[0.54, 2.05, 0.17]}>
+        <boxGeometry args={[1.95, 3.1, 0.24]} />
+        <meshStandardMaterial color="#d7dde6" metalness={0.4} roughness={0.42} />
+      </mesh>
+      <mesh position={[0, 3.9, 0.02]}>
+        <boxGeometry args={[3.4, 0.18, 0.16]} />
+        <meshStandardMaterial
+          color={doorUnlocked ? COLORS.terminalEmissive : "#8aa0b8"}
+          emissive={doorUnlocked ? COLORS.terminalEmissive : "#27415c"}
+          emissiveIntensity={doorUnlocked ? 1.4 : 0.35}
+        />
+      </mesh>
+      <group position={[3.2, 1.35, 0.35]}>
+        <mesh castShadow receiveShadow>
+          <boxGeometry args={[0.95, 1.45, 0.22]} />
+          <meshStandardMaterial color="#26384d" metalness={0.35} roughness={0.38} />
+        </mesh>
+        <mesh position={[0, 0.42, 0.12]}>
+          <boxGeometry args={[0.62, 0.22, 0.03]} />
+          <meshStandardMaterial
+            color={doorUnlocked ? COLORS.terminalEmissive : "#d7e5f2"}
+            emissive={doorUnlocked ? COLORS.terminalEmissive : "#7ba8d1"}
+            emissiveIntensity={doorUnlocked ? 1.8 : 0.55}
+          />
+        </mesh>
+        {[-0.24, 0, 0.24].map((x) =>
+          [-0.14, -0.38, -0.62].map((y) => (
+            <mesh key={`${x}-${y}`} position={[x, y, 0.13]}>
+              <boxGeometry args={[0.14, 0.14, 0.04]} />
+              <meshStandardMaterial color="#dfe7f0" metalness={0.2} roughness={0.45} />
+            </mesh>
+          ))
+        )}
+        <mesh ref={statusLight} position={[0.34, 0.42, 0.16]}>
+          <sphereGeometry args={[0.06, 16, 8]} />
+          <meshStandardMaterial
+            color={doorUnlocked ? "#2be4a8" : "#ffcf66"}
+            emissive={doorUnlocked ? "#2be4a8" : "#ffcf66"}
+            emissiveIntensity={1.4}
+          />
+        </mesh>
+        <Text
+          position={[0, 0.76, 0.14]}
+          fontSize={0.12}
+          color="#eaf4ff"
+          anchorX="center"
+          anchorY="middle"
+        >
+          API
+        </Text>
+      </group>
+    </group>
+  );
+}
+
 /**
- * The full test-chamber environment: sky dome, fog, daylight lighting, floor
+ * The full test-chamber environment: scene background/fog, daylight lighting, floor
  * slab + panel grid, perimeter trim, and all props (rendered from the shared
  * layout so they line up perfectly with the colliders).
  */
 export function Environment() {
   return (
     <group>
-      {/* Sky dome (drawn first, behind everything). */}
-      <SkyDome />
-
-      {/* Atmospheric haze that blends the platform edges into the horizon. */}
+      {/* Keep sky/fog as scene state, not a nearby world-space mesh, to avoid camera-distance scaling artifacts near platform edges. */}
+      <color attach="background" args={[FOG_COLOR]} />
       <fog attach="fog" args={[FOG_COLOR, FOG_NEAR, FOG_FAR]} />
 
       {/* Daylight: ambient fill + hemisphere sky/ground + a warm key light. */}
@@ -232,11 +322,9 @@ export function Environment() {
         />
       </directionalLight>
 
-      {/* Main floor slab */}
-      <mesh receiveShadow position={[0, -PLATFORM_THICKNESS / 2, 0]}>
-        <boxGeometry
-          args={[PLATFORM_SIZE, PLATFORM_THICKNESS, PLATFORM_SIZE]}
-        />
+      {/* Main floor baseplate */}
+      <mesh receiveShadow rotation={[-Math.PI / 2, 0, 0]}>
+        <planeGeometry args={[PLATFORM_SIZE, PLATFORM_SIZE]} />
         <meshStandardMaterial
           color={COLORS.floor}
           metalness={0.1}
@@ -254,7 +342,7 @@ export function Environment() {
         cellColor={COLORS.floorEdge}
         sectionSize={10}
         sectionThickness={1.2}
-        sectionColor={COLORS.accent}
+        sectionColor={COLORS.floorPanel}
         fadeDistance={FOG_FAR}
         fadeStrength={1.5}
         infiniteGrid={false}
@@ -262,6 +350,7 @@ export function Environment() {
 
       {/* Perimeter trim */}
       <PerimeterTrim />
+      <ApiDoor />
 
       {/* Props — rendered from the shared layout (also used for collision). */}
       {RAMP_DEFS.map((r, idx) => (
